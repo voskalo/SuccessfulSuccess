@@ -74,12 +74,13 @@ function participantErrors(
   rows: unknown,
 ): Record<number, string | undefined> {
   if (!Array.isArray(rows)) return {}
-  return Object.fromEntries(
-    rows.map((row: ParticipantErrors | undefined, index: number) => [
-      index,
-      row?.name?.message ?? row?.email?.message,
-    ]),
-  )
+  const result: Record<number, string | undefined> = {}
+  rows.forEach((row: ParticipantErrors | undefined, index: number) => {
+    if (row) {
+      result[index] = row?.name?.message ?? row?.email?.message
+    }
+  })
+  return result
 }
 
 /** Blank form for a new meeting, or the meeting's current values when editing. */
