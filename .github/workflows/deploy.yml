@@ -1,0 +1,38 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_NAME: successfulsuccess
+      AWS_REGION: us-east-1
+      AWS_DB_PASSWORD: ${{ secrets.AWS_DB_PASSWORD }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run style checks
+        run: |
+          npm ci --prefix frontend
+          npm run lint --prefix frontend
+          pip install ruff
+          ruff check .
+
+      - name: Configure AWS Credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::112372944251:role/GitHubActionsDeployRole
+          aws-region: us-east-1
+
+      - name: Deploy Backend
+        run: make aws-deploy-backend IMAGE_TAG=${{ github.sha }}
+
