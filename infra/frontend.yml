@@ -38,7 +38,7 @@ Parameters:
 
   PricingPlan:
     Type: String
-    Default: FREE
+    Default: PAY_AS_YOU_GO
     AllowedValues: [FREE, PAY_AS_YOU_GO]
     Description: >-
       FREE subscribes the distribution to CloudFront's flat-rate Free plan
