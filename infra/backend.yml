@@ -178,44 +178,23 @@ Resources:
           Value: !Ref ProjectName
 
   DbCluster:
-    Type: AWS::RDS::DBCluster
-    # A demo stack: `make aws-destroy` should leave nothing billable behind.
-    # The default (Snapshot) would keep charging for snapshot storage.
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
-    Properties:
-      DBClusterIdentifier: !Sub "${ProjectName}-db"
-      Engine: aurora-postgresql
-      EngineVersion: !If [HasDbEngineVersion, !Ref DbEngineVersion, !Ref "AWS::NoValue"]
-      DatabaseName: !Ref DbName
-      MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Ref DbPassword
-      DBSubnetGroupName: !Ref DbSubnetGroup
-      VpcSecurityGroupIds:
-        - !Ref DbSecurityGroup
-      StorageEncrypted: true
-      BackupRetentionPeriod: 1        # Aurora's minimum; the continuous backup is free up to the cluster size
-      DeletionProtection: false
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: !Ref DbMinCapacity
-        MaxCapacity: !Ref DbMaxCapacity
-        SecondsUntilAutoPause: !Ref DbAutoPauseSeconds
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  # Serverless v2 capacity lives on instances; one writer is enough here.
-  DbInstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      DBInstanceIdentifier: !Sub "${ProjectName}-db-1"
-      DBClusterIdentifier: !Ref DbCluster
-      Engine: aurora-postgresql
-      DBInstanceClass: db.serverless
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      Engine: postgres
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      StorageEncrypted: false
+      BackupRetentionPeriod: 1
       PubliclyAccessible: false
-      AutoMinorVersionUpgrade: true
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -250,7 +229,7 @@ Resources:
   ApiFunction:
     Type: AWS::Lambda::Function
     # Migrations run right after the stack settles, so the writer must exist.
-    DependsOn: DbInstance
+    DependsOn: DbCluster
     Properties:
       FunctionName: !Sub "${ProjectName}-backend"
       Description: Meetings API (FastAPI through Mangum)
