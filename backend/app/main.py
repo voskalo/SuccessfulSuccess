@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 
 import logging
+import os  # Unused import to fail the linter on purpose!
 
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
