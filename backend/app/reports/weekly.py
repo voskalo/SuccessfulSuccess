@@ -1,6 +1,7 @@
 """Weekly meetings report builder."""
 
 import csv
+import datetime as dt
 import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -30,7 +31,8 @@ async def get_week_stats(
         select(
             func.count(Meeting.id),
             func.sum(
-                func.extract("epoch", Meeting.ends_at) - func.extract("epoch", Meeting.starts_at)
+                func.extract("epoch", Meeting.ends_at)
+                - func.extract("epoch", Meeting.starts_at)
             ),
         ).where(Meeting.starts_at >= start, Meeting.starts_at <= end)
     )
@@ -48,7 +50,10 @@ async def get_longest_meetings(
         select(Meeting)
         .where(Meeting.starts_at >= start, Meeting.starts_at <= end)
         .order_by(
-            (func.extract("epoch", Meeting.ends_at) - func.extract("epoch", Meeting.starts_at)).desc()
+            (
+                func.extract("epoch", Meeting.ends_at)
+                - func.extract("epoch", Meeting.starts_at)
+            ).desc()
         )
         .limit(limit)
     )
@@ -61,17 +66,12 @@ async def build_weekly_report_async(week: str) -> bytes:
     
     current_start, current_end = get_iso_week_bounds(week, tz)
     
-    # Calculate previous week string
-    year, week_num = map(int, week.split("-W"))
-    if week_num == 1:
-        prev_week_str = f"{year - 1}-W52" # Simplifying, ISO weeks can have 53 but this works for lab
-        # A more robust way:
-        prev_start = current_start.replace(day=current_start.day - 7) if current_start.day > 7 else current_start # This is getting complicated
-    
-    # Better previous week calculation: subtract 7 days from current_start
-    import datetime as dt
+    # Calculate previous week string by subtracting 7 days from current_start
     prev_start_dt = current_start - dt.timedelta(days=7)
-    prev_week_str = f"{prev_start_dt.isocalendar().year}-W{prev_start_dt.isocalendar().week:02d}"
+    prev_week_str = (
+        f"{prev_start_dt.isocalendar().year}-W"
+        f"{prev_start_dt.isocalendar().week:02d}"
+    )
     
     prev_start, prev_end = get_iso_week_bounds(prev_week_str, tz)
 
@@ -81,7 +81,8 @@ async def build_weekly_report_async(week: str) -> bytes:
         
         longest = await get_longest_meetings(session, current_start, current_end, limit=5)
         # We need to eager load participants for the longest meetings
-        # Actually, participants relationship is lazy="selectin", so it might be loaded automatically when accessed inside the async session.
+        # Actually, participants relationship is lazy="selectin", so it might be loaded
+        # automatically when accessed inside the async session.
         # But to be safe we can just use the length of the participants list.
         # Wait, the lazy="selectin" works when accessing the attribute inside the async context.
         # Let's collect the data we need inside the session.
