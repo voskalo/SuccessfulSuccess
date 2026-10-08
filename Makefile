@@ -277,6 +277,12 @@ aws-status: ## Show the stack outputs and the API function's state
 aws-logs: ## Follow the backend function logs
 	$(AWS) logs tail /aws/lambda/$(PROJECT_NAME)-backend --follow
 
+aws-logs-builder: ## Follow the report builder function logs
+	$(AWS) logs tail /aws/lambda/$(PROJECT_NAME)-report-builder --follow
+
+aws-logs-mailer: ## Follow the report mailer function logs
+	$(AWS) logs tail /aws/lambda/$(PROJECT_NAME)-report-mailer --follow
+
 aws-frontend-cert: ## Request and validate the HTTPS certificate for AWS_FRONTEND_DOMAIN (in us-east-1)
 	$(require-aws-credentials)
 	@test -n "$(AWS_FRONTEND_DOMAIN)" || { \
@@ -368,3 +374,51 @@ aws-destroy: ## Delete every stack, including the database and its data
 	$(AWS) cloudformation delete-stack --stack-name $(ECR_STACK)
 	$(AWS) cloudformation wait stack-delete-complete --stack-name $(ECR_STACK)
 	@echo "All stacks deleted."
+
+aws-deploy-reports: ## Deploy the weekly report infrastructure
+	$(require-aws-credentials)
+	$(require-db-password)
+	@test -n "$(SES_EMAIL)" || { echo "SES_EMAIL is empty — set it in .env to your email address"; exit 1; }
+	@vpc=$$($(AWS) ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text | tr -d '[:space:]'); \
+		test "$$vpc" != "None" -a -n "$$vpc" || { echo "No default VPC"; exit 1; }; \
+		subnets=$$($(AWS) ec2 describe-subnets --filters Name=vpc-id,Values=$$vpc Name=default-for-az,Values=true --query 'Subnets[].SubnetId' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
+		routes=$$($(AWS) ec2 describe-route-tables --filters Name=vpc-id,Values=$$vpc --query 'RouteTables[].RouteTableId' --output text | tr '[:space:]' ',' | sed 's/,*$$//'); \
+		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" --image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' --output text | tr -d '[:space:]'); \
+		dbendpoint=$$($(call stack-output,$(APP_STACK),DatabaseEndpoint) | tr -d '[:space:]'); \
+		func_sg=$$($(AWS) ec2 describe-security-groups --filters Name=tag:Name,Values=$(PROJECT_NAME)-function --query 'SecurityGroups[0].GroupId' --output text | tr -d '[:space:]'); \
+		$(AWS) sesv2 get-email-identity --email-identity "$(SES_EMAIL)" >/dev/null 2>&1 || { echo "Creating SES identity for $(SES_EMAIL). Please check your email and click the verification link!"; $(AWS) sesv2 create-email-identity --email-identity "$(SES_EMAIL)"; }; \
+		echo "Deploying reports stack..."; \
+		$(AWS) cloudformation deploy \
+			--stack-name $(PROJECT_NAME)-reports \
+			--template-file infra/reports.yml \
+			--capabilities CAPABILITY_IAM \
+			--no-fail-on-empty-changeset \
+			$(STACK_TAGS) \
+			--parameter-overrides \
+				"ProjectName=$(PROJECT_NAME)" \
+				"VpcId=$$vpc" \
+				"SubnetIds=$$subnets" \
+				"RouteTableIds=$$routes" \
+				"FunctionSecurityGroupId=$$func_sg" \
+				"ImageUri=$$repo@$$digest" \
+				"Architecture=$(AWS_LAMBDA_ARCH)" \
+				"DbEndpoint=$$dbendpoint" \
+				"DbPassword=$(AWS_DB_PASSWORD)" \
+				"AppTimezone=$(APP_TIMEZONE)" \
+				"SenderEmail=$(SES_EMAIL)"
+
+report-now: ## Request a report immediately: make report-now WEEK=2026-W39
+	$(require-aws-credentials)
+	@test -n "$(WEEK)" || { echo "Usage: make report-now WEEK=2026-W40"; exit 1; }
+	@qurl=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportQueueUrl) | tr -d '[:space:]'); \
+		$(AWS) sqs send-message --queue-url "$$qurl" --message-body "{\"source\": \"manual\", \"week\": \"$(WEEK)\"}" | grep MessageId > /dev/null && echo "Message sent to queue."
+
+aws-reports-ls: ## List generated reports in S3
+	@bucket=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportsBucketName) | tr -d '[:space:]'); \
+		$(AWS) s3 ls "s3://$$bucket/reports/" --recursive
+
+aws-trigger-schedule: ## Simulate the EventBridge schedule trigger
+	@fn=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportBuilder) 2>/dev/null | tr -d '[:space:]'); \
+		test -n "$$fn" || fn="$(PROJECT_NAME)-report-builder"; \
+		$(AWS) lambda invoke --function-name "$$fn" --cli-binary-format raw-in-base64-out --payload '{"source": "schedule", "week": null}' /dev/null && echo "Simulated schedule trigger."
