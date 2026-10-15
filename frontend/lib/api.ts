@@ -1,7 +1,11 @@
 import { signOut } from "aws-amplify/auth"
 
 import { getAccessToken } from "@/lib/auth"
+import { toIsoDate } from "@/lib/datetime"
 import type {
+  Agenda,
+  AgendaSaveInput,
+  AiSuggestion,
   ApiErrorBody,
   ApiErrorDetail,
   Meeting,
@@ -110,4 +114,93 @@ export function syncMe(idToken: string) {
     method: "POST",
     body: JSON.stringify({ id_token: idToken }),
   })
+}
+
+export function getAgenda(meetingId: string) {
+  return request<Agenda | null>(`/api/v1/meetings/${meetingId}/agenda`)
+}
+
+/** The only way an agenda is written: the main API, with its usual validation. */
+export function saveAgenda(meetingId: string, payload: AgendaSaveInput) {
+  return request<Agenda>(`/api/v1/meetings/${meetingId}/agenda`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
+// --- Paste an agenda: the agenda-parser function URL (read-only) -------------
+
+/** Empty when the parser is not deployed; the screen then hides Paste an agenda. */
+export const PARSER_URL = process.env.NEXT_PUBLIC_PARSER_URL ?? ""
+export const MAX_PASTE_LENGTH = 10_000
+
+export type ParseErrorKind =
+  | "too_long"
+  | "no_agenda"
+  | "busy"
+  | "network"
+  | "unauthorized"
+  | "unavailable"
+
+const PARSE_ERROR_MESSAGES: Record<ParseErrorKind, string> = {
+  too_long: `The text is too long. Paste at most ${MAX_PASTE_LENGTH.toLocaleString("en")} characters.`,
+  no_agenda: "Could not find an agenda in this text. Try other text, or type the agenda by hand.",
+  busy: "The AI service is busy right now. Try again in a minute, or type the agenda by hand.",
+  network: "Could not reach the agenda parser. Check your connection, or type the agenda by hand.",
+  unauthorized: "Your session has expired. Sign in again to parse an agenda.",
+  unavailable: "The AI service is not available right now. Type the agenda by hand.",
+}
+
+export class ParseError extends Error {
+  readonly kind: ParseErrorKind
+
+  constructor(kind: ParseErrorKind) {
+    super(PARSE_ERROR_MESSAGES[kind])
+    this.name = "ParseError"
+    this.kind = kind
+  }
+}
+
+/**
+ * Sends pasted text to the parser and returns its suggestion. Today's date and
+ * the time zone are the user's, so "Monday" means the user's Monday. Aborting
+ * `signal` rejects with the browser's AbortError.
+ */
+export async function parseAgenda(text: string, signal: AbortSignal): Promise<AiSuggestion> {
+  if (text.length > MAX_PASTE_LENGTH) throw new ParseError("too_long")
+  const token = await getAccessToken()
+  let response: Response
+  try {
+    response = await fetch(PARSER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        text,
+        today: toIsoDate(new Date()),
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+      signal,
+      cache: "no-store",
+    })
+  } catch (error) {
+    if (signal.aborted) throw error
+    throw new ParseError("network")
+  }
+
+  if (response.ok) return (await response.json()) as AiSuggestion
+  switch (response.status) {
+    case 401:
+      throw new ParseError("unauthorized")
+    case 413:
+      throw new ParseError("too_long")
+    case 422:
+      throw new ParseError("no_agenda")
+    case 429:
+      throw new ParseError("busy")
+    default:
+      throw new ParseError("unavailable")
+  }
 }
