@@ -359,9 +359,22 @@ aws-frontend-url: ## Print the deployed site URL
 
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
+		"$(AI_STACK)" "$(PROJECT_NAME)-reports" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
+	@# Lab 6: the agenda parser and the budget alarm depend on no other stack.
+	-$(AWS) cloudformation delete-stack --stack-name $(AI_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(AI_STACK)
+	@# Lab 5: the report builder sits in the backend's security group, so the
+	@# backend stack cannot be deleted while the reports stack still exists.
+	@bucket=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportsBucketName) 2>/dev/null | tr -d '[:space:]'); \
+		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
+			echo "Emptying s3://$$bucket"; \
+			$(AWS) s3 rm "s3://$$bucket" --recursive --only-show-errors || true; \
+		fi
+	@echo "Deleting $(PROJECT_NAME)-reports — its VPC function releases network interfaces slowly, allow ~20 minutes."
+	-$(AWS) cloudformation delete-stack --stack-name $(PROJECT_NAME)-reports
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(PROJECT_NAME)-reports
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
 			echo "Emptying s3://$$bucket"; \
