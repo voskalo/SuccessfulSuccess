@@ -323,6 +323,8 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 		auth_out() { printf '%s\n' "$$auth" | awk -F '\t' -v k="$$1" '$$1 == k { print $$2 }'; }; \
 		bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) | tr -d '[:space:]'); \
 		dist=$$($(call stack-output,$(FRONTEND_STACK),DistributionId) | tr -d '[:space:]'); \
+		parser=$$($(call stack-output,$(AI_STACK),ParserUrl) 2>/dev/null | tr -d '[:space:]'); \
+		case "$$parser" in None) parser="" ;; esac; \
 		echo "Building the static export against $$api"; \
 		rm -rf frontend/out; \
 		docker build --target export --output type=local,dest=frontend/out \
@@ -331,6 +333,7 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$(auth_out UserPoolClientId)" \
 			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$(auth_out HostedDomain)" \
 			--build-arg NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED="$$(auth_out GoogleEnabled)" \
+			--build-arg NEXT_PUBLIC_PARSER_URL="$$parser" \
 			./frontend || exit 1; \
 		echo "Uploading to s3://$$bucket"; \
 		$(AWS) s3 sync frontend/out "s3://$$bucket" --delete --exclude "*.html" \
@@ -356,9 +359,22 @@ aws-frontend-url: ## Print the deployed site URL
 
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
+		"$(AI_STACK)" "$(PROJECT_NAME)-reports" "$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
+	@# Lab 6: the agenda parser and the budget alarm depend on no other stack.
+	-$(AWS) cloudformation delete-stack --stack-name $(AI_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(AI_STACK)
+	@# Lab 5: the report builder sits in the backend's security group, so the
+	@# backend stack cannot be deleted while the reports stack still exists.
+	@bucket=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportsBucketName) 2>/dev/null | tr -d '[:space:]'); \
+		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
+			echo "Emptying s3://$$bucket"; \
+			$(AWS) s3 rm "s3://$$bucket" --recursive --only-show-errors || true; \
+		fi
+	@echo "Deleting $(PROJECT_NAME)-reports — its VPC function releases network interfaces slowly, allow ~20 minutes."
+	-$(AWS) cloudformation delete-stack --stack-name $(PROJECT_NAME)-reports
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(PROJECT_NAME)-reports
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
 			echo "Emptying s3://$$bucket"; \
@@ -422,3 +438,72 @@ aws-trigger-schedule: ## Simulate the EventBridge schedule trigger
 	@fn=$$($(call stack-output,$(PROJECT_NAME)-reports,ReportBuilder) 2>/dev/null | tr -d '[:space:]'); \
 		test -n "$$fn" || fn="$(PROJECT_NAME)-report-builder"; \
 		$(AWS) lambda invoke --function-name "$$fn" --cli-binary-format raw-in-base64-out --payload '{"source": "schedule", "week": null}' /dev/null && echo "Simulated schedule trigger."
+
+# --- Paste an agenda (Lab 6) -------------------------------------------------
+
+.PHONY: llm-hello parse aws-deploy-ai aws-parser-url aws-logs-parser
+
+AI_STACK ?= $(PROJECT_NAME)-ai
+# The Bedrock model the agenda parser calls. Configuration, not code: override
+# it in .env or on the command line, e.g. make parse PARSER_MODEL=anthropic.claude-opus-5-5
+# Haiku 5.5: ~40x cheaper than Opus 5.5.
+PARSER_MODEL ?= us.anthropic.claude-haiku-4-5-20251001-v1:0
+# Where the $5 AWS Budgets alarm goes; defaults to the Lab 5 address.
+BUDGET_EMAIL ?= $(SES_EMAIL)
+export PARSER_MODEL
+
+# The LLM targets run in the backend container (rebuilt if pyproject.toml
+# changed) with the AWS credentials from .env. No database needed.
+LLM_RUN = $(COMPOSE) run --rm --no-deps --build \
+	-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
+	-e PARSER_MODEL -e RUN_MIGRATIONS_ON_START=false backend
+
+llm-hello: ## First call to Claude on Bedrock: prints the answer, stop_reason and usage
+	$(require-aws-credentials)
+	$(LLM_RUN) python -m app.ai.hello
+
+parse: ## Parse an agenda from your laptop: make parse TEXT="Пн 10:00, синк по прайсингу..."
+	$(require-aws-credentials)
+	@test -n "$(TEXT)" || { echo 'Usage: make parse TEXT="..."'; exit 1; }
+	$(LLM_RUN) python -m app.ai.agenda "$(TEXT)"
+
+aws-deploy-ai: ## Deploy the agenda parser (Lambda + function URL, outside the VPC) and the $5 budget alarm
+	$(require-aws-credentials)
+	@test -n "$(BUDGET_EMAIL)" || { echo "BUDGET_EMAIL is empty — set it (or SES_EMAIL) in .env"; exit 1; }
+	@pool=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
+		client=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) | tr -d '[:space:]'); \
+		case "$$pool" in ""|None) echo "No user pool found — run: make aws-deploy-auth"; exit 1 ;; esac; \
+		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" \
+			--image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' \
+			--output text | tr -d '[:space:]'); \
+		cors="$(AWS_CORS_ORIGINS)"; \
+		if [ -z "$$cors" ]; then \
+			cors=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
+			case "$$cors" in ""|None) cors='*' ;; esac; \
+		fi; \
+		echo "image=$$repo@$$digest model=$(PARSER_MODEL) cors=$$cors"; \
+		$(call wait-stack-idle,$(AI_STACK)); \
+		$(call clear-failed-create,$(AI_STACK)); \
+		$(AWS) cloudformation deploy \
+			--stack-name $(AI_STACK) \
+			--template-file infra/ai.yml \
+			--capabilities CAPABILITY_IAM \
+			--no-fail-on-empty-changeset \
+			$(STACK_TAGS) \
+			--parameter-overrides \
+				"ProjectName=$(PROJECT_NAME)" \
+				ImageUri="$$repo@$$digest" \
+				"Architecture=$(AWS_LAMBDA_ARCH)" \
+				"ParserModel=$(PARSER_MODEL)" \
+				"CorsOrigins=$$cors" \
+				"CognitoUserPoolId=$$pool" \
+				"CognitoClientId=$$client" \
+				"BudgetEmail=$(BUDGET_EMAIL)"
+	@$(MAKE) --no-print-directory aws-parser-url
+
+aws-parser-url: ## Print the agenda parser's URL
+	@$(call stack-output,$(AI_STACK),ParserUrl)
+
+aws-logs-parser: ## Follow the agenda parser logs (one agenda_parsed line per parse)
+	$(AWS) logs tail /aws/lambda/$(PROJECT_NAME)-agenda-parser --follow
