@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Paste an agenda: the agenda-parser Lambda function (the backend's container
+  image with another handler) behind its own function URL. It runs outside the
+  VPC, calls Claude on Amazon Bedrock directly and returns JSON; it never
+  writes anything. Plus a monthly AWS Budgets alarm at $5.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: successfulsuccess
+    Description: Prefix for the names of the resources in this stack.
+
+  ImageUri:
+    Type: String
+    Description: The backend container image, pinned by digest.
+
+  Architecture:
+    Type: String
+    Default: x86_64
+    AllowedValues: [x86_64, arm64]
+    Description: Must match the platform the image was built for.
+
+  ParserModel:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: The Bedrock model the parser calls (PARSER_MODEL).
+
+  CorsOrigins:
+    Type: CommaDelimitedList
+    Default: "*"
+    Description: The site's origins, allowed to call the parser from the browser.
+
+  CognitoUserPoolId:
+    Type: String
+    Description: User pool whose access tokens the parser accepts (the auth stack's UserPoolId).
+
+  CognitoClientId:
+    Type: String
+    Description: The app client those tokens must be issued to (the auth stack's UserPoolClientId).
+
+  BudgetEmail:
+    Type: String
+    Description: Where the AWS Budgets alarm is sent.
+
+  BudgetLimitUsd:
+    Type: Number
+    Default: 5
+    Description: Monthly cost, in US dollars, above which the alarm is sent.
+
+Resources:
+  # --- agenda parser (outside the VPC) --------------------------------------
+
+  ParserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Logs only: no VPC, no database.
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInference
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # "*" for now; narrowing it is a discussion question. Converse needs bedrock:InvokeModel.
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: "*"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ParserLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-agenda-parser"
+      RetentionInDays: 7
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  AgendaParser:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-agenda-parser"
+      Description: Parses pasted text into a suggested agenda with Claude on Bedrock
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: ["app.ai.agenda_lambda.handler"]
+      Architectures:
+        - !Ref Architecture
+      Role: !GetAtt ParserRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ParserLogGroup
+      # No VpcConfig: the parser needs no database, and outside the VPC it
+      # reaches Bedrock and Cognito's JWKS with no NAT and no VPC endpoint.
+      Environment:
+        Variables:
+          PARSER_MODEL: !Ref ParserModel
+          COGNITO_REGION: !Ref AWS::Region
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # --- function URL ---------------------------------------------------------
+
+  # Public, like the API's: the handler itself checks the Cognito access token.
+  ParserUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt AgendaParser.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowOrigins: !Ref CorsOrigins
+        AllowMethods: [POST]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 300
+
+  # The same two statements as the API's public URL in Lab 4.
+  ParserUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgendaParser
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ParserUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgendaParser
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  # --- budget alarm ---------------------------------------------------------
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${ProjectName}-monthly"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetLimitUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+Outputs:
+  ParserUrl:
+    Description: The agenda parser's URL (the function URL, without its trailing slash)
+    Value: !Sub ["https://${Host}", {Host: !Select [2, !Split ["/", !GetAtt ParserUrl.FunctionUrl]]}]
+  FunctionName:
+    Value: !Ref AgendaParser
+  LogGroupName:
+    Value: !Ref ParserLogGroup

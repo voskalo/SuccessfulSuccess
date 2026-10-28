@@ -3,6 +3,7 @@
 import { useRef } from "react"
 import { CalendarDays, Clock, Mail, MapPin, Pencil, Trash2, Users } from "lucide-react"
 
+import { AgendaPanel } from "@/components/agenda-panel"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import {
@@ -118,6 +119,11 @@ export function MeetingDetailsDialog({
               </ul>
             )}
           </section>
+
+          <Separator />
+
+          {/* Keyed by meeting, so a half-finished draft never leaks into another meeting. */}
+          <AgendaPanel key={meeting.id} meetingId={meeting.id} />
 
           <DialogFooter>
             <Button variant="destructive" onClick={() => onDelete(meeting)}>

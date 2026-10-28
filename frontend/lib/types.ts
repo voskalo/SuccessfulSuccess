@@ -54,6 +54,49 @@ export type ApiErrorBody = {
   }
 }
 
+// Mirrors backend/app/schemas/agenda.py and the parser's schema in backend/app/ai/agenda.py.
+
+export type AgendaItem = {
+  topic: string
+  owner: string | null
+  minutes: number | null
+}
+
+export type ActionItem = {
+  task: string
+  owner: string | null
+  due: string | null
+}
+
+/** What the parser returns: a suggestion, never saved without the user's Save. */
+export type ParsedAgenda = {
+  title: string | null
+  starts_at: string | null
+  duration_minutes: number | null
+  items: AgendaItem[]
+  action_items: ActionItem[]
+  language: string
+}
+
+export type AiSuggestion = {
+  agenda: ParsedAgenda
+  model: string
+  prompt_version: string
+}
+
+export type Agenda = {
+  items: AgendaItem[]
+  action_items: ActionItem[]
+  ai_suggestion: AiSuggestion | null
+  updated_at: string
+}
+
+export type AgendaSaveInput = {
+  items: AgendaItem[]
+  action_items: ActionItem[]
+  ai_suggestion: AiSuggestion | null
+}
+
 export type UserProfile = {
   id: string
   email: string | null
