@@ -21,11 +21,18 @@ Constraints:
 
 ## Decision
 
-- **Model:** Claude Haiku 5.5 through the Anthropic Messages API on Bedrock
-  (`anthropic.claude-haiku-5-5`, effort `low`). It costs about 40 times less
-  than Claude Opus 5.5, and parsing a short agenda is a small extraction task.
-  The model ID is configuration (`PARSER_MODEL`), so Opus 5.5 replaces it with no
-  code change if the Step 5 tests show Haiku missing or inventing fields.
+- **Model:** Claude Haiku 4.5 on Amazon Bedrock, through the Converse API with the
+  inference-profile ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`. It is much
+  cheaper than Claude Opus 5.5, and parsing a short agenda is a small extraction
+  task. The model ID is configuration (`PARSER_MODEL`), so another model replaces
+  it without a code change. Opus 5.5 is the lab's named model, but Bedrock did
+  not enable it for this account (HTTP 403) when this was written.
+- **Client: Converse API, not the Messages API on bedrock-mantle.** The lab asks
+  for the Messages API on bedrock-mantle. On 2026-10-28, that endpoint returned
+  HTTP 404 "does not exist" for Haiku 4.5, and the same model answered through
+  Converse with the inference-profile ID. Part 1 of the lab lists older Claude
+  models under Converse. The validation, retry and logging logic is unchanged.
+  The IAM permission is `bedrock:InvokeModel`, not `bedrock-mantle:CreateInference`.
 - **A schema, not free text.** The model must answer by calling one tool,
   `record_agenda`, whose input schema is the `ParsedAgenda` Pydantic model. The
   answer is validated. An invalid answer gets one retry with the validation
@@ -61,7 +68,7 @@ Constraints:
 ## Consequences
 
 - **Cost per parse:** about 1,500–3,000 input tokens and a few hundred output
-  tokens. At list prices that is well under $0.001 with Haiku 5.5, against
+  tokens. At list prices that is about $0.003 with Haiku 4.5, against
   roughly $0.01–0.02 with Opus 5.5. The measured value is in the `agenda_parsed`
   log lines.
 - **What is logged:** one JSON line per parse in CloudWatch, with the user's

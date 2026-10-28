@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     cognito_jwks: str = ""
 
     # The Bedrock model the agenda parser calls (PARSER_MODEL), e.g.
-    # anthropic.claude-haiku-5-5. Set in configuration, never in the code.
+    # us.anthropic.claude-haiku-4-5-20251001-v1:0. Set in configuration, never in the code.
     parser_model: str = ""
 
     @field_validator("app_timezone")

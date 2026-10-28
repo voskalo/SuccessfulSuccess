@@ -447,7 +447,7 @@ AI_STACK ?= $(PROJECT_NAME)-ai
 # The Bedrock model the agenda parser calls. Configuration, not code: override
 # it in .env or on the command line, e.g. make parse PARSER_MODEL=anthropic.claude-opus-5-5
 # Haiku 5.5: ~40x cheaper than Opus 5.5.
-PARSER_MODEL ?= anthropic.claude-haiku-5-5
+PARSER_MODEL ?= us.anthropic.claude-haiku-4-5-20251001-v1:0
 # Where the $5 AWS Budgets alarm goes; defaults to the Lab 5 address.
 BUDGET_EMAIL ?= $(SES_EMAIL)
 export PARSER_MODEL

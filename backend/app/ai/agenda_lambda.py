@@ -11,13 +11,14 @@ import logging
 import time
 from datetime import date
 
-import anthropic
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.ai.agenda import PROMPT_VERSION, AgendaParseError, cost_usd, parse_agenda
 from app.auth import AuthError, CurrentUser, get_verifier
 from app.config import settings
 
 MAX_TEXT_LENGTH = 10_000
+THROTTLING_CODES = {"ThrottlingException", "TooManyRequestsException"}
 
 log = logging.getLogger("meetings.ai")
 log.setLevel(logging.INFO)
@@ -65,10 +66,14 @@ def handler(event, context):
         agenda, usage = parse_agenda(text, today, tz)
     except AgendaParseError as e:
         return _response(422, {"error": str(e)})
-    except anthropic.RateLimitError:
-        log.warning(json.dumps({"event": "agenda_throttled", "user": user.sub}))
-        return _response(429, {"error": "the model is busy, try again in a minute"})
-    except anthropic.APIError as e:
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in THROTTLING_CODES:
+            log.warning(json.dumps({"event": "agenda_throttled", "user": user.sub}))
+            return _response(429, {"error": "the model is busy, try again in a minute"})
+        log.error(json.dumps({"event": "agenda_failed", "user": user.sub, "error": code}))
+        return _response(502, {"error": "the model is unavailable"})
+    except BotoCoreError as e:
         log.error(json.dumps({"event": "agenda_failed", "user": user.sub, "error": str(e)}))
         return _response(502, {"error": "the model is unavailable"})
 

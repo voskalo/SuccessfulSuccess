@@ -1,5 +1,9 @@
 """Parse pasted text into a structured meeting agenda with Claude on Amazon Bedrock.
 
+Calls Claude through the Bedrock Converse API (bedrock-runtime). The lab's
+Messages API client (bedrock-mantle) does not serve Claude Haiku 4.5 for this
+account, so the parser uses Converse instead; see docs/adr/0006.
+
 A plain function with no Lambda in it: `make parse TEXT="..."` runs it from a
 laptop, and app.ai.agenda_lambda serves it behind a function URL.
 """
@@ -9,18 +13,20 @@ import sys
 from datetime import date
 from functools import lru_cache
 
-from anthropic import AnthropicBedrockMantle
+import boto3
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
 
 PROMPT_VERSION = "agenda-v1"
 
-# Anthropic's list prices in $ per 1M tokens (input, output), from Part 1.
+# Bedrock list prices in $ per 1M tokens (input, output). Keys are the model IDs
+# the parser can be configured with.
 PRICES_PER_MTOK = {
     "anthropic.claude-opus-5-5": (4.00, 20.00),
     "anthropic.claude-sonnet-5-5": (2.00, 10.00),
     "anthropic.claude-haiku-5-5": (0.10, 0.50),
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": (1.00, 5.00),
 }
 
 
@@ -49,13 +55,19 @@ class AgendaParseError(Exception):
     """The model returned no agenda, or an invalid one twice."""
 
 
-RECORD_AGENDA = {
-    "name": "record_agenda",
-    "description": "Record the meeting agenda found in the user's text. "
-    "Leave a field empty when the text does not say it.",
-    "input_schema": ParsedAgenda.model_json_schema(),
+TOOL_CONFIG = {
+    "tools": [
+        {
+            "toolSpec": {
+                "name": "record_agenda",
+                "description": "Record the meeting agenda found in the user's text. "
+                "Leave a field empty when the text does not say it.",
+                "inputSchema": {"json": ParsedAgenda.model_json_schema()},
+            }
+        }
+    ]
 }
-SYSTEM = (
+SYSTEM_PROMPT = (
     "You turn text that users paste (emails, chat messages, notes) into a meeting agenda. "
     "Answer by calling record_agenda exactly once. Copy names exactly as written. "
     "Never invent a value that is not in the text: leave it empty instead. "
@@ -65,8 +77,8 @@ SYSTEM = (
 
 
 @lru_cache
-def get_client() -> AnthropicBedrockMantle:
-    return AnthropicBedrockMantle(aws_region="us-east-1")
+def get_client():
+    return boto3.client("bedrock-runtime", region_name="us-east-1")
 
 
 def cost_usd(model: str, usage: dict) -> float:
@@ -83,38 +95,43 @@ def parse_agenda(text: str, today: date, tz: str) -> tuple[ParsedAgenda, dict]:
     messages = [
         {
             "role": "user",
-            "content": f"Today is {today:%A} {today.isoformat()}, time zone {tz}.\n\n"
-            f"<pasted_text>\n{text}\n</pasted_text>",
+            "content": [
+                {
+                    "text": f"Today is {today:%A} {today.isoformat()}, time zone {tz}.\n\n"
+                    f"<pasted_text>\n{text}\n</pasted_text>"
+                }
+            ],
         }
     ]
     usage = {"input_tokens": 0, "output_tokens": 0}
     for _ in range(2):  # one retry, then give up
-        msg = client.messages.create(
-            model=settings.parser_model,
-            max_tokens=4096,
-            output_config={"effort": "low"},
-            system=SYSTEM,
-            tools=[RECORD_AGENDA],
+        resp = client.converse(
+            modelId=settings.parser_model,
+            system=[{"text": SYSTEM_PROMPT}],
             messages=messages,
+            toolConfig=TOOL_CONFIG,
+            inferenceConfig={"maxTokens": 4096},
         )
-        usage["input_tokens"] += msg.usage.input_tokens
-        usage["output_tokens"] += msg.usage.output_tokens
-        call = next((b for b in msg.content if b.type == "tool_use"), None)
-        if call is None:  # e.g. stop_reason == "refusal"
-            raise AgendaParseError(f"no agenda returned (stop_reason={msg.stop_reason})")
+        usage["input_tokens"] += resp["usage"]["inputTokens"]
+        usage["output_tokens"] += resp["usage"]["outputTokens"]
+        assistant = resp["output"]["message"]
+        call = next((b["toolUse"] for b in assistant["content"] if "toolUse" in b), None)
+        if call is None:  # e.g. stopReason == "content_filtered"
+            raise AgendaParseError(f"no agenda returned (stopReason={resp['stopReason']})")
         try:
-            return ParsedAgenda.model_validate(call.input), usage
+            return ParsedAgenda.model_validate(call["input"]), usage
         except ValidationError as e:  # show the model its mistake once
             messages += [
-                {"role": "assistant", "content": msg.content},
+                assistant,
                 {
                     "role": "user",
                     "content": [
                         {
-                            "type": "tool_result",
-                            "tool_use_id": call.id,
-                            "content": str(e),
-                            "is_error": True,
+                            "toolResult": {
+                                "toolUseId": call["toolUseId"],
+                                "content": [{"text": str(e)}],
+                                "status": "error",
+                            }
                         }
                     ],
                 },
