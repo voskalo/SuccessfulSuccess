@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (gitignored) and fill in the billing account.
+project_id          = "spry-voskalo-2026"
+billing_account     = "XXXXXX-XXXXXX-XXXXXX"
+hcp_organization_id = "org-ZiA46ZqgKZgJ5UwS"
+hcp_workspace_id    = "ws-QhdjJzFJucTpppZ9"

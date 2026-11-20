@@ -1,0 +1,18 @@
+{
+  "hosting": {
+    "site": "spry-voskalo-2026-app",
+    "public": "out",
+    "cleanUrls": true,
+    "trailingSlash": true,
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": { "serviceId": "successfulsuccess-api", "region": "us-central1" }
+      },
+      {
+        "source": "/health",
+        "run": { "serviceId": "successfulsuccess-api", "region": "us-central1" }
+      }
+    ]
+  }
+}

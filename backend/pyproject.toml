@@ -12,9 +12,15 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
     "email-validator>=2.1.0",
-    "mangum>=0.19.0",
     "pyjwt[crypto]>=2.9.0",
     "boto3>=1.34.0",
+]
+
+[project.optional-dependencies]
+# Only the Lambda image (Dockerfile.lambda) needs the adapter; Cloud Run and
+# compose run the app with uvicorn directly.
+lambda = [
+    "mangum>=0.19.0",
 ]
 
 [dependency-groups]

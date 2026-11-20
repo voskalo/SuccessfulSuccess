@@ -23,3 +23,9 @@ infra/.build/
 *.tfstate.*
 crash.log
 *.tfplan
+
+# gcp/ (Lab 9)
+gcp/.terraform/
+gcp/bootstrap/.terraform/
+gcp/bootstrap/terraform.tfvars
+frontend/.firebase/
